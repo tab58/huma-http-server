@@ -1,6 +1,7 @@
 package router
 
 import (
+	"cmp"
 	"context"
 	"net/http"
 
@@ -71,6 +72,7 @@ func RegisterRoute[I, O any, AuthInfo map[string]string](args RegisterRouteArgs[
 		url := op.Path
 		reqID := middleware.GetRequestIDFromContext(ctx)
 		authInfo := middleware.GetAuthInfoFromContext(ctx)
+		authErr := middleware.GetAuthErrorFromContext(ctx)
 		event := middleware.GetWideEventFromContext(ctx)
 
 		// attach context to the wide event
@@ -82,12 +84,33 @@ func RegisterRoute[I, O any, AuthInfo map[string]string](args RegisterRouteArgs[
 			if authInfo != nil {
 				event.UserID = authInfo["user_id"]
 			}
+			if authErr != nil {
+				event.AuthError = authErr.Error()
+			}
 		}
 
 		// test for route guards and run handler
-		if len(opts.guardFns) > 0 && authInfo != nil {
+		if len(opts.guardFns) > 0 {
+			// guarded routes require authentication: nil auth info means the
+			// request carried no valid credentials
+			if authInfo == nil {
+				if event != nil {
+					event.SetError(cmp.Or(authErr, errors.ErrUnauthenticated))
+					event.StatusCode = http.StatusUnauthorized
+				}
+				if authErr != nil {
+					// credentials were presented but invalid; detail is logged
+					// via the wide event, never returned to the client
+					return nil, huma.Error401Unauthorized("invalid credentials")
+				}
+				return nil, huma.Error401Unauthorized("authentication required")
+			}
 			for _, guard := range opts.guardFns {
 				if err := guard(ctx, authInfo); err != nil {
+					if event != nil {
+						event.SetError(err)
+						event.StatusCode = http.StatusForbidden
+					}
 					return nil, huma.Error403Forbidden("blocked by route guard", err)
 				}
 			}

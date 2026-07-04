@@ -27,6 +27,7 @@ type WideEventContext struct {
 	Path           string                       `json:"path"`            // set at runtime by the route handler
 	UserID         string                       `json:"user_id"`         // set at runtime by the route handler
 	StatusCode     int                          `json:"status_code"`     // set at runtime after the handler is called by the middleware
+	AuthError      string                       `json:"auth_error,omitempty"` // set at runtime by the route handler when presented credentials failed verification
 	Error          error                        `json:"-"`
 	ErrorMessage   string                       `json:"error,omitempty"`
 }

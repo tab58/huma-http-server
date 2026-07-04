@@ -15,6 +15,12 @@ type ctxKeyAuthInfo struct{}
 
 var AuthContextKey ctxKeyAuthInfo = ctxKeyAuthInfo{}
 
+type ctxKeyAuthError struct{}
+
+// AuthErrorContextKey holds the verification error when a request presented
+// credentials that failed to validate. Absent for anonymous requests.
+var AuthErrorContextKey ctxKeyAuthError = ctxKeyAuthError{}
+
 type IdPPlugin interface {
 	ValidateAuthorizationHeader(ctx context.Context, authHeader string) (map[string]string, error)
 }
@@ -69,11 +75,18 @@ func (a *Authenticator) BuildAuthInfo(c huma.Context) (map[string]string, error)
 
 func Authentication(authenticator Authenticator) func(ctx huma.Context, next func(huma.Context)) {
 	return func(c huma.Context, next func(huma.Context)) {
-		if authInfo, err := authenticator.BuildAuthInfo(c); err == nil {
-			next(huma.WithValue(c, AuthContextKey, authInfo))
-		} else {
-			next(c)
+		authInfo, err := authenticator.BuildAuthInfo(c)
+		if err != nil {
+			// credentials were presented but failed verification: record the
+			// error and continue unauthenticated — enforcement happens at the
+			// route layer (RegisterRoute), which returns 401 on guarded routes
+			next(huma.WithValue(c, AuthErrorContextKey, err))
+			return
 		}
+		if authInfo != nil {
+			c = huma.WithValue(c, AuthContextKey, authInfo)
+		}
+		next(c)
 	}
 }
 
@@ -83,6 +96,18 @@ func GetAuthInfoFromContext(ctx context.Context) map[string]string {
 	}
 	if authInfo, ok := ctx.Value(AuthContextKey).(map[string]string); ok {
 		return authInfo
+	}
+	return nil
+}
+
+// GetAuthErrorFromContext returns the credential-verification error for the
+// request, or nil if no credentials were presented or they were valid.
+func GetAuthErrorFromContext(ctx context.Context) error {
+	if ctx == nil {
+		return nil
+	}
+	if err, ok := ctx.Value(AuthErrorContextKey).(error); ok {
+		return err
 	}
 	return nil
 }

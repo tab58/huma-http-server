@@ -2,12 +2,12 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
-	"os"
 
 	"github.com/danielgtaylor/huma/v2"
-	"github.com/tab58/huma-http-server/config"
 	"github.com/tab58/huma-http-server/lib/jwt"
 	"github.com/tab58/huma-http-server/middleware"
 	"github.com/tab58/huma-http-server/router"
@@ -20,15 +20,24 @@ type Server struct {
 	srv *http.Server
 }
 
-// Start starts the server in a background goroutine.
-// Call Shutdown to gracefully stop it.
-func (s *Server) Start(addr string) {
-	s.srv.Addr = addr
+// Start binds to addr and serves in a background goroutine. Bind failures
+// (e.g. port already in use) are returned immediately. Errors that occur
+// while serving are sent on the returned channel, which is closed when the
+// server stops; graceful Shutdown closes it without an error.
+func (s *Server) Start(addr string) (<-chan error, error) {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to listen on %s: %w", addr, err)
+	}
+
+	errCh := make(chan error, 1)
 	go func() {
-		if err := s.srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			fmt.Fprintf(os.Stderr, "server error: %v\n", err)
+		defer close(errCh)
+		if err := s.srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- err
 		}
 	}()
+	return errCh, nil
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
@@ -39,104 +48,12 @@ func (s *Server) API() huma.API {
 	return s.api
 }
 
-type ServerConfig struct {
-	ServiceName        string
-	ServiceVersion     string
-	ServiceDescription string
-	JWTSigningSecret   string
-	Environment        config.AppMode
-}
-
-type serverConfigOptions struct {
-	openAPIVersion string
-	openAPIPath    string
-	docsPath       string
-	schemasPath    string
-	formats        map[string]huma.Format
-	defaultFormat  string
-	tokenGenerator jwt.TokenGenerator
-	idpPlugin      middleware.IdPPlugin
-	middlewares    []func(ctx huma.Context, next func(huma.Context))
-	skipPaths      []string
-}
-
-type ServerConfigOption func(*serverConfigOptions)
-
-func WithOpenAPIVersion(version string) ServerConfigOption {
-	return func(o *serverConfigOptions) {
-		o.openAPIVersion = version
-	}
-}
-
-func WithOpenAPIPath(path string) ServerConfigOption {
-	return func(o *serverConfigOptions) {
-		o.openAPIPath = path
-	}
-}
-
-func WithDocsPath(path string) ServerConfigOption {
-	return func(o *serverConfigOptions) {
-		o.docsPath = path
-	}
-}
-
-func WithSchemasPath(path string) ServerConfigOption {
-	return func(o *serverConfigOptions) {
-		o.schemasPath = path
-	}
-}
-
-func WithFormats(formats map[string]huma.Format) ServerConfigOption {
-	return func(o *serverConfigOptions) {
-		o.formats = formats
-	}
-}
-
-func WithDefaultFormat(format string) ServerConfigOption {
-	return func(o *serverConfigOptions) {
-		o.defaultFormat = format
-	}
-}
-
-func WithTokenGenerator(tokenGenerator jwt.TokenGenerator) ServerConfigOption {
-	return func(o *serverConfigOptions) {
-		o.tokenGenerator = tokenGenerator
-	}
-}
-
-func WithMiddleware(middleware func(ctx huma.Context, next func(huma.Context))) ServerConfigOption {
-	return func(o *serverConfigOptions) {
-		o.middlewares = append(o.middlewares, middleware)
-	}
-}
-
-func WithIdPPlugin(idpPlugin middleware.IdPPlugin) ServerConfigOption {
-	return func(o *serverConfigOptions) {
-		o.idpPlugin = idpPlugin
-	}
-}
-
-func WithSkipPaths(skipPaths []string) ServerConfigOption {
-	return func(o *serverConfigOptions) {
-		o.skipPaths = skipPaths
-	}
-}
-
-func loadServerConfigOptions(options []ServerConfigOption) *serverConfigOptions {
-	o := serverConfigOptions{
-		openAPIVersion: "3.1.0",
-		openAPIPath:    "/openapi",
-		docsPath:       "/docs",
-		schemasPath:    "/schemas",
-		formats:        huma.DefaultFormats,
-		defaultFormat:  "application/json",
-		middlewares:    make([]func(ctx huma.Context, next func(huma.Context)), 0),
-		idpPlugin:      nil,
-	}
-	for _, option := range options {
-		option(&o)
-	}
-	return &o
+// Handle registers a raw http.Handler on the underlying mux (e.g. static
+// pages, file servers, websocket upgrades). These routes bypass the huma
+// middleware chain (request ID, auth, wide events) and do not appear in the
+// OpenAPI spec. Register routes before calling Start.
+func (s *Server) Handle(pattern string, handler http.Handler) {
+	s.mux.Handle(pattern, handler)
 }
 
 // New creates a new Huma API server.
@@ -188,7 +105,16 @@ func New(cfg ServerConfig, options ...ServerConfigOption) *Server {
 	router := router.New(serverConfig, routerOptions...)
 
 	return &Server{
-		srv: &http.Server{Handler: router.Mux()},
+		srv: &http.Server{
+			Handler: router.Mux(),
+			// ReadHeaderTimeout is the amount of time allowed to read request headers.
+			// This is a security measure to prevent slowloris attacks.
+			ReadHeaderTimeout: opts.readHeaderTimeout,
+			// ReadTimeout is the maximum duration for reading the entire request, including the body.
+			ReadTimeout: opts.readTimeout,
+			// IdleTimeout is the maximum amount of time to wait for the next request when keep-alives are enabled.
+			IdleTimeout: opts.idleTimeout,
+		},
 		api: router.API(),
 		mux: router.Mux(),
 	}
