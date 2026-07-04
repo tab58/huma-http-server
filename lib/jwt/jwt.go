@@ -14,6 +14,15 @@ type (
 	MapClaims = lib.MapClaims
 )
 
+// reservedClaims are managed by this package and can never be set (or
+// overridden) via caller-supplied data.
+var reservedClaims = map[string]struct{}{
+	"exp":     {},
+	"iat":     {},
+	JTI_CLAIM: {},
+	TYP_CLAIM: {},
+}
+
 func getClaims(data map[string]string, timeout time.Duration) lib.MapClaims {
 	// create base claims
 	claims := lib.MapClaims{
@@ -21,8 +30,11 @@ func getClaims(data map[string]string, timeout time.Duration) lib.MapClaims {
 		"iat": time.Now().Unix(),
 	}
 
-	// merge metadata claims into claims
+	// merge metadata claims into claims, skipping reserved names
 	for key, value := range data {
+		if _, reserved := reservedClaims[key]; reserved {
+			continue
+		}
 		claims[key] = value
 	}
 
@@ -44,7 +56,12 @@ func claimUnix(v any) (int64, bool) {
 	return 0, false
 }
 
-func verifyClaims(claims lib.MapClaims, timeout time.Duration) (map[string]string, error) {
+func verifyClaims(claims lib.MapClaims, timeout time.Duration, expectedTyp string) (map[string]string, error) {
+	// Verify the token type claim (fail closed: absent typ is rejected)
+	if typ, _ := claims[TYP_CLAIM].(string); typ != expectedTyp {
+		return nil, fmt.Errorf("unexpected token type: %w", errors.ErrUnauthenticated)
+	}
+
 	// Verify expiry and iat claims
 	expiry, ok := claimUnix(claims["exp"])
 	if !ok {
@@ -80,7 +97,7 @@ type signingData struct {
 	Secret []byte
 }
 
-func verifyJWT(token string, timeout time.Duration, signer *signingData) (map[string]string, error) {
+func verifyJWT(token string, timeout time.Duration, signer *signingData, expectedTyp string) (map[string]string, error) {
 	// parse and verify the JWT token
 	parsedToken, err := lib.Parse(token, func(token *lib.Token) (any, error) {
 		// verify the signing method
@@ -98,11 +115,18 @@ func verifyJWT(token string, timeout time.Duration, signer *signingData) (map[st
 	if !ok {
 		return nil, errors.Wrap(errors.ErrUnauthenticated, "failed to extract claims from JWT")
 	}
-	return verifyClaims(claims, timeout)
+	return verifyClaims(claims, timeout, expectedTyp)
 }
 
-func createJWT(data map[string]string, timeout time.Duration, signer *signingData) (string, error) {
+// createJWT signs a token with the given data claims. The typ claim declares
+// the token type; a non-empty jti is set as the "jti" claim. Both are
+// reserved — caller data cannot supply them.
+func createJWT(data map[string]string, timeout time.Duration, signer *signingData, jti string, typ string) (string, error) {
 	claims := getClaims(data, timeout)
+	claims[TYP_CLAIM] = typ
+	if jti != "" {
+		claims[JTI_CLAIM] = jti
+	}
 	token := lib.NewWithClaims(signer.Method, claims)
 	tokenString, err := token.SignedString(signer.Secret)
 	if err != nil {

@@ -63,8 +63,14 @@ func New(cfg ServerConfig, options ...ServerConfigOption) *Server {
 	// build config objects
 	var authenticator *middleware.Authenticator
 	if cfg.JWTSigningSecret != "" {
+		// WithTokenGenerator overrides the default (e.g. to enable
+		// refresh-token revocation via jwt.NewTokenGeneratorWithRevocation)
+		generator := opts.tokenGenerator
+		if generator == nil && cfg.JWTSigningSecret != "" {
+			generator = jwt.NewTokenGenerator(cfg.JWTSigningSecret)
+		}
 		authenticator = &middleware.Authenticator{
-			Generator:        jwt.NewTokenGenerator(cfg.JWTSigningSecret),
+			Generator:        generator,
 			IdentityProvider: opts.idpPlugin,
 		}
 	}

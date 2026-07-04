@@ -116,6 +116,25 @@ func TestValidTokenOnGuardedRouteSucceeds(t *testing.T) {
 	}
 }
 
+func TestRefreshTokenCookieDoesNotAuthenticate(t *testing.T) {
+	r := newAuthRouter(t)
+	registerRoute(r, "/guarded", allowAll)
+
+	refreshToken, err := jwt.CreateRefreshToken(context.Background(), map[string]string{"user_id": "u1"}, testSecret)
+	if err != nil {
+		t.Fatalf("CreateRefreshToken: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/guarded", nil)
+	req.AddCookie(&http.Cookie{Name: middleware.REFRESH_TOKEN_COOKIE_NAME, Value: string(refreshToken)})
+	r.Mux().ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("valid refresh token cookie on guarded route: got %d, want %d — refresh tokens must not act as request auth", w.Code, http.StatusUnauthorized)
+	}
+}
+
 func TestInvalidTokenOnPublicRoutePassesThroughUnauthenticated(t *testing.T) {
 	r := newAuthRouter(t)
 	registerRoute(r, "/public") // no guards

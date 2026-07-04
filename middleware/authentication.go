@@ -38,26 +38,19 @@ func (a *Authenticator) ExchangeRefreshToken(ctx context.Context, refreshToken j
 	return a.Generator.ExchangeRefreshToken(ctx, refreshToken)
 }
 
+// BuildAuthInfo resolves request credentials to auth info. Refresh tokens are
+// deliberately not accepted here: they are only honored at the token-exchange
+// endpoint (ExchangeRefreshToken), never as request authentication.
 func (a *Authenticator) BuildAuthInfo(c huma.Context) (map[string]string, error) {
 	ctx := c.Context()
 	authHeader := c.Header(AUTHORIZATION_HEADER_NAME)
 	accessToken := c.Header(ACCESS_TOKEN_HEADER_NAME)
-	var refreshToken string = ""
-	if refreshTokenCookie, err := huma.ReadCookie(c, REFRESH_TOKEN_COOKIE_NAME); err == nil {
-		refreshToken = refreshTokenCookie.Value
-	}
 
 	var authInfo map[string]string
 
 	// check the tokens for auth info
 	if accessToken != "" {
 		tokenInfo, err := a.Generator.VerifyAccessToken(ctx, jwt.AccessToken(accessToken))
-		if err != nil {
-			return nil, err
-		}
-		authInfo = tokenInfo
-	} else if refreshToken != "" {
-		tokenInfo, err := a.Generator.VerifyRefreshToken(ctx, jwt.RefreshToken(refreshToken))
 		if err != nil {
 			return nil, err
 		}
