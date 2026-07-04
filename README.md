@@ -95,6 +95,8 @@ curl http://localhost:8888/greeting/world
 # {"message":"Hello, world!"}
 ```
 
+`Start` serves plain TCP — the expected deployment is behind a TLS-terminating reverse proxy, which is also the place for rate limiting. To terminate TLS in-process instead, use `srv.StartTLS(addr, certFile, keyFile)`. Request bodies are capped at 1 MB per operation by huma unless `Operation.MaxBodyBytes` says otherwise. For cross-origin browser clients, enable CORS (including preflight handling) with `server.WithCORS(middleware.CORSConfig{AllowedOrigins: []string{"https://app.example.com"}})`.
+
 ## Authentication
 
 Set `JWTSigningSecret` to enable the JWT middleware. Access tokens are read from the `X-App-Key` header; an external IdP can additionally validate the `Authorization` header via `WithIdPPlugin`.
@@ -153,7 +155,9 @@ gen := jwt.NewTokenGeneratorWithRevocation(secret, myRevocationStore)
 srv := server.New(cfg, BuildUser, server.WithTokenGenerator(gen))
 ```
 
-Refresh tokens never authenticate requests — they are only accepted by your token-exchange endpoint via `ExchangeRefreshToken`.
+Refresh tokens never authenticate requests — they are only accepted by your token-exchange endpoint via the generator's `ExchangeRefreshToken`.
+
+Token lifetimes default to 15 minutes (access) and 7 days (refresh); override per generator with `jwt.WithAccessTokenExpiry` / `jwt.WithRefreshTokenExpiry`. Verification validates `exp` (required, with 30 s clock-skew leeway) and the `typ` claim; changing an expiry does not invalidate outstanding tokens. Non-string claims (`nbf`, array `aud`, numeric customs) on externally minted tokens are tolerated and dropped from the claims map. Known limits: HS256 only, no signing-key rotation, no `iss`/`aud` validation.
 
 ## Raw routes
 
@@ -174,9 +178,11 @@ return nil, fmt.Errorf("order %s: %w", id, errors.ErrNotFound) // → 404, detai
 return nil, fmt.Errorf("db down: %w", errors.ErrInternalServerError) // → 500, generic message; detail logged only
 ```
 
+Sentinels: `ErrBadRequest` (400), `ErrUnauthenticated` (401), `ErrUnauthorized` (403), `ErrNotFound` (404), `ErrConflict` (409), `ErrTooManyRequests` (429), `ErrNotImplemented` (501), `ErrInternalServerError` (500). For anything else, return a `huma.StatusError` (e.g. `huma.Error409Conflict("already running")`) — it passes through to the client unchanged.
+
 ## Configuration
 
-`server.New` accepts functional options: OpenAPI paths (`WithOpenAPIPath`, `WithDocsPath`, `WithSchemasPath`), server timeouts (`WithReadHeaderTimeout`, `WithReadTimeout`, `WithIdleTimeout`), wide-event sampling (`WithSampleRate`, `WithSlowThreshold`, `WithSampleFn`), auth (`WithTokenGenerator`, `WithIdPPlugin`), and more — see `config.go`.
+`server.New` accepts functional options: OpenAPI paths (`WithOpenAPIPath`, `WithDocsPath`, `WithSchemasPath`), server timeouts (`WithReadHeaderTimeout`, `WithReadTimeout`, `WithIdleTimeout`), wide-event sampling and logging (`WithSampleRate`, `WithSlowThreshold`, `WithSampleFn`, `WithLogger`), auth (`WithTokenGenerator`, `WithIdPPlugin`), CORS (`WithCORS`), and more — see `config.go`.
 
 App configuration loads from environment variables (and optionally a config file) into your own struct:
 
@@ -192,11 +198,11 @@ if err := config.Load(&cfg); err != nil { // config.Load(&cfg, config.WithConfig
 }
 ```
 
-Fields tagged `sensitive:"true"` are redacted in the startup log (only the last 5 characters shown).
+`config.Load` doesn't print anything by default. Pass `config.WithConfigDump()` to log the loaded config via `slog`; fields tagged `sensitive:"true"` (including in nested structs) are redacted — only the last 5 characters show.
 
 ## Observability
 
-Every request gets a **wide event**: one structured JSON log line (via `log/slog`) with service metadata, method/path, status, duration, user ID, and error detail. Tail sampling keeps volume down — errors and slow requests are always logged, the rest at `SampleRate` (default 5%). Attach your own context from handlers:
+Every request gets a **wide event**: one structured log record (via `log/slog`, the event as a nested attr) with service metadata, method/path, request ID, status, duration, user ID, and error detail. Requests matching no route are logged too (404/405). Tail sampling keeps volume down — 4xx/5xx and slow requests are always logged, the rest at `SampleRate` (default 5%; `WithSampleRate(0)` disables success sampling). Attach your own context from handlers:
 
 ```go
 if event := middleware.GetWideEventFromContext(ctx); event != nil {

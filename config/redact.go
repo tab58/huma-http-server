@@ -18,16 +18,26 @@ func redactSecret(s string) string {
 }
 
 // redactedForLog renders a config struct as JSON with every field tagged
-// `sensitive:"true"` redacted. Non-string sensitive fields are fully masked.
-// ponytail: top-level fields only — recurse into nested structs if a config
-// ever needs them.
+// `sensitive:"true"` redacted, recursing into nested structs. Non-string
+// sensitive fields are fully masked.
 func redactedForLog(cfg any) (string, error) {
-	v := reflect.ValueOf(cfg)
+	out, err := redactedFields(reflect.ValueOf(cfg))
+	if err != nil {
+		return "", err
+	}
+	rendered, err := json.Marshal(out)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal config for logging: %w", err)
+	}
+	return string(rendered), nil
+}
+
+func redactedFields(v reflect.Value) (map[string]any, error) {
 	if v.Kind() == reflect.Ptr {
 		v = v.Elem()
 	}
 	if v.Kind() != reflect.Struct {
-		return "", fmt.Errorf("config must be a struct or pointer to a struct")
+		return nil, fmt.Errorf("config must be a struct or pointer to a struct")
 	}
 
 	t := v.Type()
@@ -50,12 +60,30 @@ func redactedForLog(cfg any) (string, error) {
 			}
 			continue
 		}
-		out[name] = v.Field(i).Interface()
-	}
 
-	rendered, err := json.Marshal(out)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal config for logging: %w", err)
+		out[name] = redactedValue(v.Field(i))
 	}
-	return string(rendered), nil
+	return out, nil
+}
+
+// redactedValue recurses into nested structs so their sensitive tags apply;
+// anything else (including types with custom JSON marshaling, e.g. time.Time)
+// passes through as-is.
+func redactedValue(fv reflect.Value) any {
+	deref := fv
+	if deref.Kind() == reflect.Ptr {
+		if deref.IsNil() {
+			return nil
+		}
+		deref = deref.Elem()
+	}
+	if deref.Kind() == reflect.Struct {
+		if _, isMarshaler := fv.Interface().(json.Marshaler); !isMarshaler {
+			nested, err := redactedFields(deref)
+			if err == nil {
+				return nested
+			}
+		}
+	}
+	return fv.Interface()
 }

@@ -126,7 +126,7 @@ func TestRefreshTokenCookieDoesNotAuthenticate(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/guarded", nil)
-	req.AddCookie(&http.Cookie{Name: middleware.REFRESH_TOKEN_COOKIE_NAME, Value: string(refreshToken)})
+	req.AddCookie(&http.Cookie{Name: "refresh_token", Value: string(refreshToken)})
 	r.Mux().ServeHTTP(w, req)
 
 	if w.Code != http.StatusUnauthorized {

@@ -2,8 +2,11 @@ package jwt
 
 import (
 	"context"
-	"encoding/json"
 	"testing"
+	"time"
+
+	lib "github.com/golang-jwt/jwt/v5"
+	"github.com/tab58/huma-http-server/errors"
 )
 
 const testSecret = "test-signing-secret"
@@ -41,31 +44,6 @@ func TestRefreshTokenRoundTrip(t *testing.T) {
 	}
 }
 
-func TestExchangeRefreshTokenPackageLevel(t *testing.T) {
-	ctx := context.Background()
-	refresh, err := CreateRefreshToken(ctx, map[string]string{"sub": "user-1"}, testSecret)
-	if err != nil {
-		t.Fatalf("CreateRefreshToken: %v", err)
-	}
-
-	access, newRefresh, err := ExchangeRefreshToken(ctx, refresh, testSecret)
-	if err != nil {
-		t.Fatalf("ExchangeRefreshToken: %v", err)
-	}
-	if info, err := VerifyAccessToken(ctx, access, testSecret); err != nil || info["sub"] != "user-1" {
-		t.Fatalf("exchanged access token invalid: info=%v err=%v", info, err)
-	}
-	if _, err := VerifyRefreshToken(ctx, newRefresh, testSecret); err != nil {
-		t.Fatalf("exchanged refresh token invalid: %v", err)
-	}
-
-	t.Run("garbage refresh token rejected", func(t *testing.T) {
-		if _, _, err := ExchangeRefreshToken(ctx, RefreshToken("garbage"), testSecret); err == nil {
-			t.Error("expected error, got nil")
-		}
-	})
-}
-
 func TestGeneratorAccessTokenRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	gen := NewTokenGenerator(testSecret)
@@ -80,30 +58,6 @@ func TestGeneratorAccessTokenRoundTrip(t *testing.T) {
 	}
 	if info["sub"] != "user-1" {
 		t.Errorf("claims = %v, want sub=user-1", info)
-	}
-}
-
-func TestClaimUnix(t *testing.T) {
-	tests := []struct {
-		name     string
-		in       any
-		expected int64
-		ok       bool
-	}{
-		{"float64 (JSON round trip)", float64(1700000000), 1700000000, true},
-		{"int64 (in-process)", int64(1700000000), 1700000000, true},
-		{"json.Number", json.Number("1700000000"), 1700000000, true},
-		{"invalid json.Number", json.Number("not-a-number"), 0, false},
-		{"string rejected", "1700000000", 0, false},
-		{"nil rejected", nil, 0, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, ok := claimUnix(tt.in)
-			if got != tt.expected || ok != tt.ok {
-				t.Errorf("claimUnix(%v) = (%d, %v), want (%d, %v)", tt.in, got, ok, tt.expected, tt.ok)
-			}
-		})
 	}
 }
 
@@ -136,7 +90,7 @@ func TestVerifyAccessTokenRejectsBadInput(t *testing.T) {
 	})
 
 	t.Run("refresh token rejected as access token", func(t *testing.T) {
-		// Refresh tokens carry a 7d expiry — the access-token timeout check must reject them.
+		// The typ claim check must reject refresh tokens used as access tokens.
 		token, err := CreateRefreshToken(ctx, map[string]string{"sub": "user-1"}, testSecret)
 		if err != nil {
 			t.Fatalf("CreateRefreshToken: %v", err)
@@ -145,4 +99,96 @@ func TestVerifyAccessTokenRejectsBadInput(t *testing.T) {
 			t.Error("expected error for refresh token used as access token, got nil")
 		}
 	})
+}
+
+func TestVerificationFailuresMapTo401(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now()
+
+	tests := []struct {
+		name   string
+		claims lib.MapClaims
+	}{
+		{"expired token", lib.MapClaims{
+			"exp":     now.Add(-2 * time.Minute).Unix(),
+			"iat":     now.Add(-17 * time.Minute).Unix(),
+			TYP_CLAIM: TOKEN_TYPE_ACCESS,
+			"sub":     "u1",
+		}},
+		{"missing exp rejected", lib.MapClaims{
+			"iat":     now.Unix(),
+			TYP_CLAIM: TOKEN_TYPE_ACCESS,
+			"sub":     "u1",
+		}},
+		{"wrong typ", lib.MapClaims{
+			"exp":     now.Add(ACCESS_TOKEN_EXPIRY).Unix(),
+			"iat":     now.Unix(),
+			TYP_CLAIM: TOKEN_TYPE_REFRESH,
+			"sub":     "u1",
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			token := signRaw(t, tt.claims)
+			_, err := VerifyAccessToken(ctx, AccessToken(token), testSecret)
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !errors.Is(err, errors.ErrUnauthenticated) {
+				t.Errorf("verification failure should map to ErrUnauthenticated (401), got %v", err)
+			}
+		})
+	}
+}
+
+func TestCustomExpiryTokensVerify(t *testing.T) {
+	// Tokens minted with non-default expiries must still verify — changing
+	// the configured expiry cannot invalidate outstanding tokens.
+	ctx := context.Background()
+	gen := NewTokenGenerator(testSecret, WithAccessTokenExpiry(time.Hour), WithRefreshTokenExpiry(30*24*time.Hour))
+
+	access, err := gen.CreateAccessToken(ctx, map[string]string{"sub": "u1"})
+	if err != nil {
+		t.Fatalf("CreateAccessToken: %v", err)
+	}
+	// verifies with a default-expiry generator too
+	if _, err := NewTokenGenerator(testSecret).VerifyAccessToken(ctx, access); err != nil {
+		t.Fatalf("token with custom expiry rejected: %v", err)
+	}
+
+	refresh, err := gen.CreateRefreshToken(ctx, map[string]string{"sub": "u1"})
+	if err != nil {
+		t.Fatalf("CreateRefreshToken: %v", err)
+	}
+	if _, err := NewTokenGenerator(testSecret).VerifyRefreshToken(ctx, refresh); err != nil {
+		t.Fatalf("refresh token with custom expiry rejected: %v", err)
+	}
+}
+
+func TestNonStringClaimsTolerated(t *testing.T) {
+	// Externally minted tokens may carry nbf, array aud, or numeric custom
+	// claims — verification keeps string claims and drops the rest.
+	ctx := context.Background()
+	now := time.Now()
+	token := signRaw(t, lib.MapClaims{
+		"exp":     now.Add(ACCESS_TOKEN_EXPIRY).Unix(),
+		"iat":     now.Unix(),
+		"nbf":     now.Unix(),
+		"aud":     []string{"svc-a", "svc-b"},
+		"count":   42,
+		TYP_CLAIM: TOKEN_TYPE_ACCESS,
+		"sub":     "u1",
+	})
+	info, err := VerifyAccessToken(ctx, AccessToken(token), testSecret)
+	if err != nil {
+		t.Fatalf("VerifyAccessToken rejected non-string claims: %v", err)
+	}
+	if info["sub"] != "u1" {
+		t.Errorf("string claim lost: info = %v", info)
+	}
+	for _, dropped := range []string{"nbf", "aud", "count", "exp", "iat"} {
+		if _, present := info[dropped]; present {
+			t.Errorf("non-string claim %q should be dropped from info", dropped)
+		}
+	}
 }

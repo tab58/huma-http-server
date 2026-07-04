@@ -1,9 +1,7 @@
 package jwt
 
 import (
-	"encoding/json"
 	"fmt"
-	"math"
 	"time"
 
 	lib "github.com/golang-jwt/jwt/v5"
@@ -41,52 +39,21 @@ func getClaims(data map[string]string, timeout time.Duration) lib.MapClaims {
 	return claims
 }
 
-// claimUnix reads a Unix-seconds numeric claim. golang-jwt parses JSON numbers
-// as float64; claims built in-process carry int64.
-func claimUnix(v any) (int64, bool) {
-	switch n := v.(type) {
-	case float64:
-		return int64(n), true
-	case int64:
-		return n, true
-	case json.Number:
-		i, err := n.Int64()
-		return i, err == nil
-	}
-	return 0, false
-}
-
-func verifyClaims(claims lib.MapClaims, timeout time.Duration, expectedTyp string) (map[string]string, error) {
+func verifyClaims(claims lib.MapClaims, expectedTyp string) (map[string]string, error) {
 	// Verify the token type claim (fail closed: absent typ is rejected)
 	if typ, _ := claims[TYP_CLAIM].(string); typ != expectedTyp {
 		return nil, fmt.Errorf("unexpected token type: %w", errors.ErrUnauthenticated)
 	}
 
-	// Verify expiry and iat claims
-	expiry, ok := claimUnix(claims["exp"])
-	if !ok {
-		return nil, fmt.Errorf("missing or invalid exp claim: %w", errors.ErrBadRequest)
-	}
-	issuedAt, ok := claimUnix(claims["iat"])
-	if !ok {
-		return nil, fmt.Errorf("missing or invalid iat claim: %w", errors.ErrBadRequest)
-	}
-	tOut := time.Unix(expiry, 0).Sub(time.Unix(issuedAt, 0))
-
-	if math.Abs(float64(timeout-tOut)) > float64(1*time.Second) {
-		return nil, fmt.Errorf("invalid timeout: %w", errors.ErrBadRequest)
-	}
-
+	// exp validity is enforced by the parser (WithExpirationRequired +
+	// leeway). Keep only string claims: registered numeric/array claims
+	// (exp, iat, nbf, aud, ...) and non-string custom claims are dropped,
+	// not rejected — externally minted tokens may carry them.
 	data := make(map[string]string)
 	for key, value := range claims {
-		if key == "exp" || key == "iat" {
-			continue
+		if s, ok := value.(string); ok {
+			data[key] = s
 		}
-		s, ok := value.(string)
-		if !ok {
-			return nil, fmt.Errorf("non-string claim %q: %w", key, errors.ErrBadRequest)
-		}
-		data[key] = s
 	}
 
 	return data, nil
@@ -97,15 +64,17 @@ type signingData struct {
 	Secret []byte
 }
 
-func verifyJWT(token string, timeout time.Duration, signer *signingData, expectedTyp string) (map[string]string, error) {
-	// parse and verify the JWT token
+func verifyJWT(token string, signer *signingData, expectedTyp string) (map[string]string, error) {
+	// parse and verify the JWT token; exp is required and validated by the
+	// parser (with leeway for clock skew), so verification failures — expired,
+	// forged, malformed — all map to 401, never 400
 	parsedToken, err := lib.Parse(token, func(token *lib.Token) (any, error) {
 		// verify the signing method
 		if _, ok := token.Method.(*lib.SigningMethodHMAC); !ok {
 			return nil, errors.Wrap(errors.ErrUnauthenticated, "unexpected signing method")
 		}
 		return []byte(signer.Secret), nil
-	})
+	}, lib.WithExpirationRequired(), lib.WithLeeway(CLOCK_SKEW_LEEWAY))
 	if err != nil {
 		return nil, errors.Wrap(errors.ErrUnauthenticated, "failed to parse JWT")
 	}
@@ -115,7 +84,7 @@ func verifyJWT(token string, timeout time.Duration, signer *signingData, expecte
 	if !ok {
 		return nil, errors.Wrap(errors.ErrUnauthenticated, "failed to extract claims from JWT")
 	}
-	return verifyClaims(claims, timeout, expectedTyp)
+	return verifyClaims(claims, expectedTyp)
 }
 
 // createJWT signs a token with the given data claims. The typ claim declares

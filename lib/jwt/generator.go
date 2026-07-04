@@ -17,12 +17,41 @@ type TokenGenerator interface {
 }
 
 type tokenGenerator struct {
-	jwtSecret string
-	store     RevocationStore // nil disables revocation checks
+	jwtSecret     string
+	store         RevocationStore // nil disables revocation checks
+	accessExpiry  time.Duration
+	refreshExpiry time.Duration
+}
+
+// GeneratorOption configures a TokenGenerator.
+type GeneratorOption func(*tokenGenerator)
+
+// WithAccessTokenExpiry overrides the default access-token lifetime
+// (ACCESS_TOKEN_EXPIRY).
+func WithAccessTokenExpiry(d time.Duration) GeneratorOption {
+	return func(gen *tokenGenerator) {
+		gen.accessExpiry = d
+	}
+}
+
+// WithRefreshTokenExpiry overrides the default refresh-token lifetime
+// (REFRESH_TOKEN_EXPIRY).
+func WithRefreshTokenExpiry(d time.Duration) GeneratorOption {
+	return func(gen *tokenGenerator) {
+		gen.refreshExpiry = d
+	}
 }
 
 func (gen *tokenGenerator) GenerateNewTokenPair(ctx context.Context, info map[string]string) (AccessToken, RefreshToken, error) {
-	return GenerateNewTokenPair(ctx, info, gen.jwtSecret)
+	accessToken, err := gen.CreateAccessToken(ctx, info)
+	if err != nil {
+		return "", "", err
+	}
+	refreshToken, err := gen.CreateRefreshToken(ctx, info)
+	if err != nil {
+		return "", "", err
+	}
+	return accessToken, refreshToken, nil
 }
 
 func (gen *tokenGenerator) VerifyAccessToken(ctx context.Context, accessToken AccessToken) (map[string]string, error) {
@@ -53,11 +82,11 @@ func (gen *tokenGenerator) VerifyRefreshToken(ctx context.Context, refreshToken 
 }
 
 func (gen *tokenGenerator) CreateAccessToken(ctx context.Context, info map[string]string) (AccessToken, error) {
-	return CreateAccessToken(ctx, info, gen.jwtSecret)
+	return createAccessToken(info, gen.jwtSecret, gen.accessExpiry)
 }
 
 func (gen *tokenGenerator) CreateRefreshToken(ctx context.Context, info map[string]string) (RefreshToken, error) {
-	return CreateRefreshToken(ctx, info, gen.jwtSecret)
+	return createRefreshToken(info, gen.jwtSecret, gen.refreshExpiry)
 }
 
 // ExchangeRefreshToken verifies the refresh token (including the revocation
@@ -77,7 +106,7 @@ func (gen *tokenGenerator) ExchangeRefreshToken(ctx context.Context, refreshToke
 	if gen.store != nil {
 		// upper bound on the old token's remaining life; the store may drop
 		// the entry after this time
-		expiresAt := time.Now().Add(REFRESH_TOKEN_EXPIRY)
+		expiresAt := time.Now().Add(gen.refreshExpiry)
 		if err := gen.store.Revoke(ctx, info[JTI_CLAIM], expiresAt); err != nil {
 			return "", "", errors.Wrap(errors.ErrInternalServerError, "failed to revoke old refresh token")
 		}
@@ -85,18 +114,30 @@ func (gen *tokenGenerator) ExchangeRefreshToken(ctx context.Context, refreshToke
 	return access, refresh, nil
 }
 
-func NewTokenGenerator(jwtSecret string) TokenGenerator {
-	return &tokenGenerator{
-		jwtSecret: jwtSecret,
+func NewTokenGenerator(jwtSecret string, options ...GeneratorOption) TokenGenerator {
+	gen := &tokenGenerator{
+		jwtSecret:     jwtSecret,
+		accessExpiry:  ACCESS_TOKEN_EXPIRY,
+		refreshExpiry: REFRESH_TOKEN_EXPIRY,
 	}
+	for _, option := range options {
+		option(gen)
+	}
+	return gen
 }
 
 // NewTokenGeneratorWithRevocation returns a TokenGenerator that enforces
 // refresh-token rotation: verification consults the store's denylist and
 // every exchange revokes the old token's jti.
-func NewTokenGeneratorWithRevocation(jwtSecret string, store RevocationStore) TokenGenerator {
-	return &tokenGenerator{
-		jwtSecret: jwtSecret,
-		store:     store,
+func NewTokenGeneratorWithRevocation(jwtSecret string, store RevocationStore, options ...GeneratorOption) TokenGenerator {
+	gen := &tokenGenerator{
+		jwtSecret:     jwtSecret,
+		store:         store,
+		accessExpiry:  ACCESS_TOKEN_EXPIRY,
+		refreshExpiry: REFRESH_TOKEN_EXPIRY,
 	}
+	for _, option := range options {
+		option(gen)
+	}
+	return gen
 }

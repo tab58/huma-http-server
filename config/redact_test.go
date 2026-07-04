@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 type redactTestConfig struct {
@@ -41,6 +42,48 @@ func TestRedactedForLog(t *testing.T) {
 	}
 	if !strings.Contains(out, "example.com") || !strings.Contains(out, "8080") {
 		t.Fatalf("non-sensitive fields must print unredacted, got: %s", out)
+	}
+}
+
+func TestRedactedForLogNestedStructs(t *testing.T) {
+	type dbConfig struct {
+		Host     string `mapstructure:"DB_HOST"`
+		Password string `mapstructure:"DB_PASSWORD" sensitive:"true"`
+	}
+	type appConfig struct {
+		Name      string    `mapstructure:"APP_NAME"`
+		DB        dbConfig  `mapstructure:"DB"`
+		Replica   *dbConfig `mapstructure:"REPLICA"`
+		NoReplica *dbConfig `mapstructure:"NO_REPLICA"`
+		StartedAt time.Time `mapstructure:"STARTED_AT"`
+	}
+
+	cfg := appConfig{
+		Name:      "svc",
+		DB:        dbConfig{Host: "db.internal", Password: "nested-secret-value-xy9zq"},
+		Replica:   &dbConfig{Host: "replica.internal", Password: "replica-secret-value-qw8er"},
+		StartedAt: time.Date(2026, 7, 3, 0, 0, 0, 0, time.UTC),
+	}
+
+	out, err := redactedForLog(&cfg)
+	if err != nil {
+		t.Fatalf("redactedForLog: %v", err)
+	}
+
+	if strings.Contains(out, "nested-secret-value") || strings.Contains(out, "replica-secret-value") {
+		t.Fatalf("nested secret leaked into log output: %s", out)
+	}
+	if !strings.Contains(out, "*****xy9zq") || !strings.Contains(out, "*****qw8er") {
+		t.Fatalf("nested secrets not redacted with last-5 suffix: %s", out)
+	}
+	if !strings.Contains(out, "db.internal") || !strings.Contains(out, "replica.internal") {
+		t.Fatalf("nested non-sensitive fields must print unredacted: %s", out)
+	}
+	if !strings.Contains(out, `"NO_REPLICA":null`) {
+		t.Fatalf("nil nested pointer should render as null: %s", out)
+	}
+	if !strings.Contains(out, "2026-07-03") {
+		t.Fatalf("time.Time should marshal via its own JSON marshaler: %s", out)
 	}
 }
 

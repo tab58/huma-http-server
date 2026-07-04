@@ -9,7 +9,6 @@ import (
 
 const AUTHORIZATION_HEADER_NAME = "Authorization"
 const ACCESS_TOKEN_HEADER_NAME = "X-App-Key"
-const REFRESH_TOKEN_COOKIE_NAME = "refresh_token"
 
 type ctxKeyAuthInfo struct{}
 

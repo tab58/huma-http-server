@@ -1,8 +1,12 @@
 package middleware_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -94,6 +98,107 @@ func TestWideEventLogsErrorRequests(t *testing.T) {
 
 	if w := get(r, "/fail", nil); w.Code != http.StatusInternalServerError {
 		t.Fatalf("got %d, want 500", w.Code)
+	}
+}
+
+// capturedEvent decodes the "event" attr of a JSONHandler wide-event record.
+type capturedEvent struct {
+	Event struct {
+		StatusCode int    `json:"status_code"`
+		Method     string `json:"method"`
+		Path       string `json:"path"`
+		RequestID  string `json:"request_id"`
+	} `json:"event"`
+}
+
+func decodeWideEvent(t *testing.T, buf *bytes.Buffer) capturedEvent {
+	t.Helper()
+	var rec capturedEvent
+	if err := json.Unmarshal(buf.Bytes(), &rec); err != nil {
+		t.Fatalf("decode wide event log %q: %v", buf.String(), err)
+	}
+	return rec
+}
+
+func TestValidationFailureWideEventCarriesRequestIdentity(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+
+	r := router.New(huma.Config{
+		OpenAPI: &huma.OpenAPI{
+			OpenAPI: "3.1.0",
+			Info:    &huma.Info{Title: "test", Version: "0.0.1"},
+		},
+		Formats:       huma.DefaultFormats,
+		DefaultFormat: "application/json",
+	}, router.MapAuthInfoBuilder,
+		router.WithMiddleware(middleware.RequestID()),
+		router.WithMiddleware(middleware.WideEvent(middleware.WideEventConfig{ServiceName: "svc", Logger: logger})),
+	)
+
+	type validateInput struct {
+		Body struct {
+			Name string `json:"name" minLength:"3"`
+		}
+	}
+	router.RegisterRoute(r, router.RegisterRouteArgs[validateInput, wideEventOutput, router.MapAuthInfo]{
+		Operation: huma.Operation{OperationID: "validate", Method: http.MethodPost, Path: "/validate"},
+		Handler: func(ctx context.Context, authInfo router.MapAuthInfo, input *validateInput) (*wideEventOutput, error) {
+			return &wideEventOutput{}, nil
+		},
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/validate", strings.NewReader(`{"name":"x"}`))
+	req.Header.Set("Content-Type", "application/json")
+	r.Mux().ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("got %d, want 422: %s", w.Code, w.Body.String())
+	}
+
+	// 4xx counts as an error → always sampled, so exactly this event is logged
+	rec := decodeWideEvent(t, &buf)
+	if rec.Event.StatusCode != http.StatusUnprocessableEntity {
+		t.Errorf("event status_code = %d, want 422", rec.Event.StatusCode)
+	}
+	if rec.Event.Method != http.MethodPost || rec.Event.Path != "/validate" {
+		t.Errorf("event method/path = %q %q, want POST /validate", rec.Event.Method, rec.Event.Path)
+	}
+	if rec.Event.RequestID == "" {
+		t.Error("event request_id is empty")
+	}
+}
+
+func TestUnmatchedRouteLogsWideEvent(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /known", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	h := middleware.WideEventNotFound(middleware.WideEventConfig{ServiceName: "svc", Logger: logger}, mux)
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/nope", nil))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("got %d, want 404", w.Code)
+	}
+	rec := decodeWideEvent(t, &buf)
+	if rec.Event.StatusCode != http.StatusNotFound || rec.Event.Path != "/nope" || rec.Event.Method != http.MethodGet {
+		t.Errorf("event = %+v, want 404 GET /nope", rec.Event)
+	}
+
+	// matched routes are the huma middleware's job — the wrapper stays silent
+	buf.Reset()
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/known", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200", w.Code)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("matched route logged by the 404 wrapper: %s", buf.String())
 	}
 }
 

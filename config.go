@@ -1,6 +1,7 @@
 package server
 
 import (
+	"log/slog"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -34,6 +35,8 @@ type serverConfigOptions struct {
 	sampleRate        float64
 	slowThreshold     time.Duration
 	sampleFn          func(event *middleware.WideEventContext) bool
+	logger            *slog.Logger
+	cors              *middleware.CORSConfig
 }
 
 func loadServerConfigOptions(options []ServerConfigOption) *serverConfigOptions {
@@ -50,6 +53,7 @@ func loadServerConfigOptions(options []ServerConfigOption) *serverConfigOptions 
 		readHeaderTimeout: 5 * time.Second,
 		readTimeout:       10 * time.Second,
 		idleTimeout:       120 * time.Second,
+		sampleRate:        middleware.DEFAULT_SAMPLE_RATE,
 	}
 	for _, option := range options {
 		option(&o)
@@ -78,11 +82,27 @@ func WithIdleTimeout(timeout time.Duration) ServerConfigOption {
 }
 
 // WithSampleRate sets the wide-event tail-sampling rate for fast, successful
-// requests (errors and slow requests are always logged). 0 means the
-// middleware default (0.05).
+// requests (errors and slow requests are always logged). Defaults to 0.05;
+// 0 disables success sampling entirely.
 func WithSampleRate(rate float64) ServerConfigOption {
 	return func(o *serverConfigOptions) {
 		o.sampleRate = rate
+	}
+}
+
+// WithLogger sets the slog.Logger used for wide events. Defaults to
+// slog.Default().
+func WithLogger(logger *slog.Logger) ServerConfigOption {
+	return func(o *serverConfigOptions) {
+		o.logger = logger
+	}
+}
+
+// WithCORS enables CORS handling (including preflight) at the HTTP layer,
+// covering huma routes and raw Handle() routes alike.
+func WithCORS(cfg middleware.CORSConfig) ServerConfigOption {
+	return func(o *serverConfigOptions) {
+		o.cors = &cfg
 	}
 }
 

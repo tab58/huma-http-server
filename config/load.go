@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"reflect"
 
 	"github.com/spf13/viper"
@@ -34,6 +35,16 @@ type LoadOption func(*loadOptions)
 
 type loadOptions struct {
 	configFile string
+	dumpConfig bool
+}
+
+// WithConfigDump logs the loaded config via slog at Info level, with fields
+// tagged `sensitive:"true"` redacted. Off by default — a library should not
+// print, and untagged secrets would leak.
+func WithConfigDump() LoadOption {
+	return func(o *loadOptions) {
+		o.dumpConfig = true
+	}
 }
 
 // WithConfigFile reads configuration from the given file (any format viper
@@ -64,9 +75,6 @@ func Load[T any](cfg *T, options ...LoadOption) error {
 		if err := v.ReadInConfig(); err != nil {
 			return fmt.Errorf("failed to read config file %s: %w", opts.configFile, err)
 		}
-		fmt.Println("Using config file:", v.ConfigFileUsed())
-	} else {
-		fmt.Println("no config file specified, using environment variables...")
 	}
 
 	// pull in environment variables
@@ -79,12 +87,14 @@ func Load[T any](cfg *T, options ...LoadOption) error {
 		return fmt.Errorf("failed to unmarshal config: %w", err)
 	}
 
-	// print configuration with fields tagged `sensitive:"true"` redacted
-	cfgJson, err := redactedForLog(cfg)
-	if err != nil {
-		return fmt.Errorf("failed to marshal config: %w", err)
+	// opt-in: log the config with fields tagged `sensitive:"true"` redacted
+	if opts.dumpConfig {
+		cfgJson, err := redactedForLog(cfg)
+		if err != nil {
+			return fmt.Errorf("failed to marshal config: %w", err)
+		}
+		slog.Info("config loaded", "file", v.ConfigFileUsed(), "config", cfgJson)
 	}
-	fmt.Println("config: ", cfgJson)
 
 	return nil
 }

@@ -8,11 +8,15 @@ import (
 func TestApplyWideEventDefaults(t *testing.T) {
 	t.Run("zero values get defaults", func(t *testing.T) {
 		cfg := applyWideEventDefaults(WideEventConfig{})
-		if cfg.SampleRate != DEFAULT_SAMPLE_RATE {
-			t.Errorf("SampleRate = %v, want %v", cfg.SampleRate, DEFAULT_SAMPLE_RATE)
+		// SampleRate has no zero-default: 0 must disable success sampling
+		if cfg.SampleRate != 0 {
+			t.Errorf("SampleRate = %v, want 0 (disabled)", cfg.SampleRate)
 		}
 		if cfg.SlowThreshold != DEFAULT_SLOW_THRESHOLD {
 			t.Errorf("SlowThreshold = %v, want %v", cfg.SlowThreshold, DEFAULT_SLOW_THRESHOLD)
+		}
+		if cfg.Logger == nil {
+			t.Error("Logger should default to slog.Default(), got nil")
 		}
 	})
 

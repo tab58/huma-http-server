@@ -22,11 +22,24 @@ type Server[A router.AuthInfo] struct {
 	router *router.Router[A] // carries the API, mux, and AuthInfoBuilder
 }
 
-// Start binds to addr and serves in a background goroutine. Bind failures
-// (e.g. port already in use) are returned immediately. Errors that occur
-// while serving are sent on the returned channel, which is closed when the
-// server stops; graceful Shutdown closes it without an error.
+// Start binds to addr and serves plain TCP in a background goroutine — use it
+// behind a TLS-terminating reverse proxy, or use StartTLS to terminate TLS
+// here. Bind failures (e.g. port already in use) are returned immediately.
+// Errors that occur while serving are sent on the returned channel, which is
+// closed when the server stops; graceful Shutdown closes it without an error.
 func (s *Server[A]) Start(addr string) (<-chan error, error) {
+	return s.start(addr, s.srv.Serve)
+}
+
+// StartTLS is Start with TLS termination, using the given certificate and
+// key files.
+func (s *Server[A]) StartTLS(addr, certFile, keyFile string) (<-chan error, error) {
+	return s.start(addr, func(ln net.Listener) error {
+		return s.srv.ServeTLS(ln, certFile, keyFile)
+	})
+}
+
+func (s *Server[A]) start(addr string, serve func(net.Listener) error) (<-chan error, error) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to listen on %s: %w", addr, err)
@@ -35,7 +48,7 @@ func (s *Server[A]) Start(addr string) (<-chan error, error) {
 	errCh := make(chan error, 1)
 	go func() {
 		defer close(errCh)
-		if err := s.srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
 	}()
@@ -86,6 +99,7 @@ func New[A router.AuthInfo](cfg ServerConfig, builder router.AuthInfoBuilder[A],
 		SampleRate:     opts.sampleRate,
 		SlowThreshold:  opts.slowThreshold,
 		SampleFn:       opts.sampleFn,
+		Logger:         opts.logger,
 	}
 	serverConfig := huma.Config{
 		OpenAPI: &huma.OpenAPI{
@@ -117,10 +131,17 @@ func New[A router.AuthInfo](cfg ServerConfig, builder router.AuthInfoBuilder[A],
 	routerOptions := buildRouterOptions(middlewares)
 	rtr := router.New(serverConfig, builder, routerOptions...)
 
+	// http-level wrappers: wide events for unmatched routes (404/405), then
+	// CORS outermost so preflight is answered before route matching
+	var handler http.Handler = middleware.WideEventNotFound(wideEventConfig, rtr.Mux())
+	if opts.cors != nil {
+		handler = middleware.CORS(*opts.cors, handler)
+	}
+
 	return &Server[A]{
 		router: rtr,
 		srv: &http.Server{
-			Handler: rtr.Mux(),
+			Handler: handler,
 			// ReadHeaderTimeout is the amount of time allowed to read request headers.
 			// This is a security measure to prevent slowloris attacks.
 			ReadHeaderTimeout: opts.readHeaderTimeout,
