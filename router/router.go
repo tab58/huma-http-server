@@ -7,16 +7,19 @@ import (
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 )
 
-type Router struct {
-	api huma.API
-	mux *http.ServeMux
+// Router is a huma API over a ServeMux with one server-wide AuthInfo type.
+// The builder given to New converts raw JWT claims into A for every route.
+type Router[A AuthInfo] struct {
+	api     huma.API
+	mux     *http.ServeMux
+	builder AuthInfoBuilder[A]
 }
 
-func (r *Router) API() huma.API {
+func (r *Router[A]) API() huma.API {
 	return r.api
 }
 
-func (r *Router) Mux() *http.ServeMux {
+func (r *Router[A]) Mux() *http.ServeMux {
 	return r.mux
 }
 
@@ -42,7 +45,7 @@ func WithMiddleware(middleware func(ctx huma.Context, next func(huma.Context))) 
 	}
 }
 
-func New(cfg huma.Config, options ...RouterOption) *Router {
+func New[A AuthInfo](cfg huma.Config, builder AuthInfoBuilder[A], options ...RouterOption) *Router[A] {
 	mux := http.NewServeMux()
 	api := humago.New(mux, cfg)
 
@@ -53,8 +56,9 @@ func New(cfg huma.Config, options ...RouterOption) *Router {
 		api.UseMiddleware(middleware)
 	}
 
-	return &Router{
-		api: api,
-		mux: mux,
+	return &Router[A]{
+		api:     api,
+		mux:     mux,
+		builder: builder,
 	}
 }

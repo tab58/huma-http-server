@@ -31,6 +31,9 @@ type serverConfigOptions struct {
 	readHeaderTimeout time.Duration
 	readTimeout       time.Duration
 	idleTimeout       time.Duration
+	sampleRate        float64
+	slowThreshold     time.Duration
+	sampleFn          func(event *middleware.WideEventContext) bool
 }
 
 func loadServerConfigOptions(options []ServerConfigOption) *serverConfigOptions {
@@ -71,6 +74,30 @@ func WithReadTimeout(timeout time.Duration) ServerConfigOption {
 func WithIdleTimeout(timeout time.Duration) ServerConfigOption {
 	return func(o *serverConfigOptions) {
 		o.idleTimeout = timeout
+	}
+}
+
+// WithSampleRate sets the wide-event tail-sampling rate for fast, successful
+// requests (errors and slow requests are always logged). 0 means the
+// middleware default (0.05).
+func WithSampleRate(rate float64) ServerConfigOption {
+	return func(o *serverConfigOptions) {
+		o.sampleRate = rate
+	}
+}
+
+// WithSlowThreshold sets the duration above which a request is always logged.
+// 0 means the middleware default (2s).
+func WithSlowThreshold(threshold time.Duration) ServerConfigOption {
+	return func(o *serverConfigOptions) {
+		o.slowThreshold = threshold
+	}
+}
+
+// WithSampleFn sets a custom predicate that forces a wide event to be logged.
+func WithSampleFn(fn func(event *middleware.WideEventContext) bool) ServerConfigOption {
+	return func(o *serverConfigOptions) {
+		o.sampleFn = fn
 	}
 }
 

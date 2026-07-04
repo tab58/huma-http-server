@@ -11,33 +11,30 @@ import (
 )
 
 // RegisterRouteArgs is the arguments for the RegisterRoute function
-type RegisterRouteArgs[I, O, AuthInfo any] struct {
-	API         huma.API
+type RegisterRouteArgs[I, O any, A AuthInfo] struct {
 	Operation   huma.Operation
-	Handler     RouteHandler[I, O, AuthInfo]
-	RouteGuards []RouteGuardFunc[AuthInfo]
+	Handler     RouteHandler[I, O, A]
+	RouteGuards []RouteGuardFunc[A]
 }
 
 // RouteHandler is the type of handler to register for the route
-type RouteHandler[I, O, AuthInfo any] func(context.Context, AuthInfo, *I) (*O, error)
+type RouteHandler[I, O any, A AuthInfo] func(context.Context, A, *I) (*O, error)
 
 // RegisterOption is the type of option for the RegisterRoute function
-type RegisterOption[AuthInfo any] func(*registerOptions[AuthInfo])
+type RegisterOption[A AuthInfo] func(*registerOptions[A])
 
 // registerOptions contains the options for the RegisterRoute function
-type registerOptions[AuthInfo any] struct {
-	guardFns []RouteGuardFunc[AuthInfo]
+type registerOptions[A AuthInfo] struct {
+	guardFns []RouteGuardFunc[A]
 }
 
-func loadRegisterOptions[AuthInfo any](guardFns []RouteGuardFunc[AuthInfo], opts []RegisterOption[AuthInfo]) *registerOptions[AuthInfo] {
+func loadRegisterOptions[A AuthInfo](guardFns []RouteGuardFunc[A], opts []RegisterOption[A]) *registerOptions[A] {
 	// load the guard functions
-	guards := make([]RouteGuardFunc[AuthInfo], 0)
-	for _, guard := range guardFns {
-		guards = append(guards, guard)
-	}
+	guards := make([]RouteGuardFunc[A], 0, len(guardFns))
+	guards = append(guards, guardFns...)
 
 	// set defaults
-	o := registerOptions[AuthInfo]{
+	o := registerOptions[A]{
 		guardFns: guards,
 	}
 
@@ -49,17 +46,19 @@ func loadRegisterOptions[AuthInfo any](guardFns []RouteGuardFunc[AuthInfo], opts
 }
 
 // RouteGuardFunc is the type of guard function to register for the route
-type RouteGuardFunc[AuthInfo any] func(ctx context.Context, authInfo AuthInfo) error
+type RouteGuardFunc[A AuthInfo] func(ctx context.Context, authInfo A) error
 
-func WithRouteGuard[AuthInfo any](guard RouteGuardFunc[AuthInfo]) RegisterOption[AuthInfo] {
-	return func(o *registerOptions[AuthInfo]) {
+func WithRouteGuard[A AuthInfo](guard RouteGuardFunc[A]) RegisterOption[A] {
+	return func(o *registerOptions[A]) {
 		o.guardFns = append(o.guardFns, guard)
 	}
 }
 
-// RegisterRoute registers a route with the given options.
-func RegisterRoute[I, O any, AuthInfo map[string]string](args RegisterRouteArgs[I, O, AuthInfo], options ...RegisterOption[AuthInfo]) {
-	api := args.API
+// RegisterRoute registers a route on the router. The router's AuthInfoBuilder
+// converts raw claims into the server-wide AuthInfo type before guards run.
+func RegisterRoute[I, O any, A AuthInfo](r *Router[A], args RegisterRouteArgs[I, O, A], options ...RegisterOption[A]) {
+	api := r.api
+	builder := r.builder
 	op := args.Operation
 	handler := args.Handler
 	routeGuards := args.RouteGuards
@@ -71,7 +70,7 @@ func RegisterRoute[I, O any, AuthInfo map[string]string](args RegisterRouteArgs[
 		method := op.Method
 		url := op.Path
 		reqID := middleware.GetRequestIDFromContext(ctx)
-		authInfo := middleware.GetAuthInfoFromContext(ctx)
+		rawAuthInfo := middleware.GetAuthInfoFromContext(ctx)
 		authErr := middleware.GetAuthErrorFromContext(ctx)
 		event := middleware.GetWideEventFromContext(ctx)
 
@@ -81,19 +80,35 @@ func RegisterRoute[I, O any, AuthInfo map[string]string](args RegisterRouteArgs[
 			event.Method = method
 			event.Path = url
 
-			if authInfo != nil {
-				event.UserID = authInfo["user_id"]
-			}
 			if authErr != nil {
 				event.AuthError = authErr.Error()
 			}
 		}
 
+		// convert raw claims into the server-wide AuthInfo type
+		authenticated := rawAuthInfo != nil
+		var authInfo A
+		if authenticated {
+			built, err := builder(ctx, rawAuthInfo)
+			if err != nil {
+				statusCode := errors.MapErrorToStatus(err)
+				if event != nil {
+					event.SetError(err)
+					event.StatusCode = statusCode
+				}
+				return nil, errors.MapErrorToHumaStatus(err)
+			}
+			authInfo = built
+			if event != nil {
+				event.UserID = authInfo.UserID()
+			}
+		}
+
 		// test for route guards and run handler
 		if len(opts.guardFns) > 0 {
-			// guarded routes require authentication: nil auth info means the
+			// guarded routes require authentication: no auth info means the
 			// request carried no valid credentials
-			if authInfo == nil {
+			if !authenticated {
 				if event != nil {
 					event.SetError(cmp.Or(authErr, errors.ErrUnauthenticated))
 					event.StatusCode = http.StatusUnauthorized
@@ -119,12 +134,11 @@ func RegisterRoute[I, O any, AuthInfo map[string]string](args RegisterRouteArgs[
 
 		// error
 		if err != nil {
-			statusCode := getErrorStatusCode(err)
 			if event != nil {
 				event.SetError(err)
-				event.StatusCode = statusCode
+				event.StatusCode = errors.MapErrorToStatus(err)
 			}
-			return nil, getHumaErrorStatus(err, statusCode)
+			return nil, errors.MapErrorToHumaStatus(err)
 		}
 
 		// success
@@ -141,53 +155,4 @@ func getSuccessStatusCode(op huma.Operation) int {
 		return op.DefaultStatus
 	}
 	return http.StatusOK
-}
-
-func getErrorStatusCode(err error) int {
-	// 400 Bad Request
-	if errors.Is(err, errors.ErrBadRequest) {
-		return http.StatusBadRequest
-	}
-	// 401 Unauthorized
-	if errors.Is(err, errors.ErrUnauthenticated) {
-		return http.StatusUnauthorized
-	}
-	// 403 Forbidden
-	if errors.Is(err, errors.ErrUnauthorized) {
-		return http.StatusForbidden
-	}
-	// 404 Not Found
-	if errors.Is(err, errors.ErrNotFound) {
-		return http.StatusNotFound
-	}
-	// 500 Internal Server Error
-	if errors.Is(err, errors.ErrInternalServerError) {
-		return http.StatusInternalServerError
-	}
-	// 501 Not Implemented
-	if errors.Is(err, errors.ErrNotImplemented) {
-		return http.StatusNotImplemented
-	}
-
-	// default to 500 Internal Server Error
-	return http.StatusInternalServerError
-}
-
-func getHumaErrorStatus(err error, statusCode int) huma.StatusError {
-	switch statusCode {
-	case http.StatusBadRequest: // 400
-		return huma.Error400BadRequest("", err)
-	case http.StatusUnauthorized: // 401
-		return huma.Error401Unauthorized("", err)
-	case http.StatusForbidden: // 403
-		return huma.Error403Forbidden("", err)
-	case http.StatusNotFound: // 404
-		return huma.Error404NotFound("", err)
-	case http.StatusInternalServerError: // 500
-		return huma.Error500InternalServerError("", err)
-	case http.StatusNotImplemented: // 501
-		return huma.Error501NotImplemented("", err)
-	default:
-		return huma.Error500InternalServerError("", err)
-	}
 }

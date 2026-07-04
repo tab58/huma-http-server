@@ -23,14 +23,14 @@ type testOutput struct {
 }
 
 // echoHandler reports what auth state actually reached the handler.
-func echoHandler(ctx context.Context, authInfo map[string]string, input *struct{}) (*testOutput, error) {
+func echoHandler(ctx context.Context, authInfo router.MapAuthInfo, input *struct{}) (*testOutput, error) {
 	out := &testOutput{}
 	out.Body.AuthInfoPresent = authInfo != nil
 	out.Body.AuthErrorPresent = middleware.GetAuthErrorFromContext(ctx) != nil
 	return out, nil
 }
 
-func newAuthRouter(t *testing.T) *router.Router {
+func newAuthRouter(t *testing.T) *router.Router[router.MapAuthInfo] {
 	t.Helper()
 	authenticator := middleware.Authenticator{Generator: jwt.NewTokenGenerator(testSecret)}
 	return router.New(huma.Config{
@@ -40,12 +40,11 @@ func newAuthRouter(t *testing.T) *router.Router {
 		},
 		Formats:       huma.DefaultFormats,
 		DefaultFormat: "application/json",
-	}, router.WithMiddleware(middleware.Authentication(authenticator)))
+	}, router.MapAuthInfoBuilder, router.WithMiddleware(middleware.Authentication(authenticator)))
 }
 
-func registerRoute(r *router.Router, path string, guards ...router.RouteGuardFunc[map[string]string]) {
-	router.RegisterRoute(router.RegisterRouteArgs[struct{}, testOutput, map[string]string]{
-		API: r.API(),
+func registerRoute(r *router.Router[router.MapAuthInfo], path string, guards ...router.RouteGuardFunc[router.MapAuthInfo]) {
+	router.RegisterRoute(r, router.RegisterRouteArgs[struct{}, testOutput, router.MapAuthInfo]{
 		Operation: huma.Operation{
 			OperationID: strings.TrimPrefix(path, "/"),
 			Method:      http.MethodGet,
@@ -56,7 +55,7 @@ func registerRoute(r *router.Router, path string, guards ...router.RouteGuardFun
 	})
 }
 
-func get(r *router.Router, path string, headers map[string]string) *httptest.ResponseRecorder {
+func get(r *router.Router[router.MapAuthInfo], path string, headers map[string]string) *httptest.ResponseRecorder {
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, path, nil)
 	for k, v := range headers {
@@ -66,7 +65,7 @@ func get(r *router.Router, path string, headers map[string]string) *httptest.Res
 	return w
 }
 
-func allowAll(ctx context.Context, authInfo map[string]string) error { return nil }
+func allowAll(ctx context.Context, authInfo router.MapAuthInfo) error { return nil }
 
 func validToken(t *testing.T) string {
 	t.Helper()

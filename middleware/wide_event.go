@@ -60,19 +60,35 @@ func (c *WideEventContext) AttachEventContext(eventType string, eventData map[st
 	c.Events[eventType] = eventData
 }
 
+const DEFAULT_SAMPLE_RATE = 0.05
+const DEFAULT_SLOW_THRESHOLD = 2 * time.Second
+
 type WideEventConfig struct {
 	ServiceName    string
 	ServiceVersion string
 	Environment    string
-	SampleRate     float64       // default is 0.05
-	SlowThreshold  time.Duration // default is 2s
+	SampleRate     float64       // 0 means DEFAULT_SAMPLE_RATE (0.05)
+	SlowThreshold  time.Duration // 0 means DEFAULT_SLOW_THRESHOLD (2s)
 	// Logger         *slog.Logger
 	SkipPaths []string
 	SampleFn  func(event *WideEventContext) bool
 }
 
+// applyWideEventDefaults returns a copy of cfg with documented defaults
+// applied to zero values.
+func applyWideEventDefaults(cfg WideEventConfig) WideEventConfig {
+	if cfg.SampleRate == 0 {
+		cfg.SampleRate = DEFAULT_SAMPLE_RATE
+	}
+	if cfg.SlowThreshold == 0 {
+		cfg.SlowThreshold = DEFAULT_SLOW_THRESHOLD
+	}
+	return cfg
+}
+
 // WideEvent is a middleware that attaches the wide event context to the request context.
 func WideEvent(cfg WideEventConfig) func(ctx huma.Context, next func(huma.Context)) {
+	cfg = applyWideEventDefaults(cfg)
 	skipSet := make(map[string]struct{}, len(cfg.SkipPaths))
 	for _, p := range cfg.SkipPaths {
 		skipSet[p] = struct{}{}

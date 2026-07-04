@@ -67,7 +67,10 @@ func MapErrorToStatus(err error) int {
 	}
 }
 
-// MapErrorToHumaStatus maps a domain error to a huma.StatusError for HTTP responses.
+// MapErrorToHumaStatus maps a domain error to a huma.StatusError for HTTP
+// responses. 4xx errors carry their detail to the client (intentional
+// messaging); 5xx errors return a generic message only — the real error must
+// be logged server-side (the wide event does this), never sent to clients.
 func MapErrorToHumaStatus(err error) huma.StatusError {
 	code := MapErrorToStatus(err)
 	switch code {
@@ -80,8 +83,8 @@ func MapErrorToHumaStatus(err error) huma.StatusError {
 	case http.StatusNotFound:
 		return huma.Error404NotFound("", err)
 	case http.StatusNotImplemented:
-		return huma.Error501NotImplemented("", err)
+		return huma.Error501NotImplemented("not implemented")
 	default:
-		return huma.Error500InternalServerError("", err)
+		return huma.Error500InternalServerError("internal server error")
 	}
 }
