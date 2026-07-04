@@ -15,13 +15,13 @@ Review findings from evaluating this library as the HTTP server for `tenzing-age
 - [x] **Refresh token accepted as request auth.** Done: `BuildAuthInfo` no longer reads the `refresh_token` cookie; only access tokens (`X-App-Key`) and the IdP `Authorization` header authenticate requests. Refresh tokens are honored solely via `ExchangeRefreshToken` at a consumer-built exchange endpoint (`REFRESH_TOKEN_COOKIE_NAME` stays exported for that). Covered by `middleware/authentication_test.go`.
 - [x] **No refresh-token rotation/revocation.** Done: refresh tokens carry a random `jti` claim; `RevocationStore` interface (`IsRevoked`/`Revoke`) is the denylist hook (no built-in impl — consumers bring Redis/DB). `NewTokenGeneratorWithRevocation` enforces it: verify fails closed on revoked or jti-less refresh tokens, and every exchange revokes the old jti. Wire via `WithTokenGenerator` (option was previously dead — now honored in `server.New`). Covered by `lib/jwt/rotation_test.go`.
 - [x] **No token-type claim.** Done: tokens carry a reserved `typ` claim (`access`/`refresh`); verification requires an exact match and fails closed (missing/wrong `typ` → rejected, caller data cannot forge it). The `exp - iat` duration check remains as a secondary claim-sanity check. Breaking: tokens minted before this change no longer verify. Covered by `lib/jwt/typ_test.go`.
-- [ ] **Config load prints secrets.** `config/load.go:59` dumps the full config JSON (including `JWTSigningSecret`) to stdout. Remove or redact sensitive fields.
+- [x] **Config load prints secrets.** Done: fields tagged `sensitive:"true"` are redacted in the config log — last 5 characters shown (`*****ab1de`) so operators can confirm the right secret loaded; values ≤5 chars and non-string secrets are fully masked (`config/redact.go`). Consumers must tag their secret fields. Covered by `config/redact_test.go`.
 - [ ] **Internal errors leak to clients.** `register.go:153-169` passes the wrapped internal error into `huma.Error5xx(...)`, exposing internal detail in response bodies. Return a generic message for 5xx; log the real error server-side.
 - [x] **Claims collision.** Done (required by the jti work): `getClaims` skips reserved claim names (`exp`, `iat`, `jti`) when merging caller data, so callers cannot forge expiry or token IDs. Covered by `TestReservedClaimsCannotBeOverridden`.
 
 ## Bugs
 
-- [ ] **Config log branches inverted.** `config/load.go:41-45`: on `ReadInConfig` error it prints "Using config file: ..."; on success it prints "config file not found". Swap the branches.
+- [x] **Config log branches inverted.** Done: branches swapped in `config/load.go` (fixed alongside the secret-redaction change in the same function).
 - [ ] **Wide-event sampling defaults never applied.** Comments promise `SampleRate` default 0.05 and `SlowThreshold` default 2s (`middleware/wide_event.go:66-67`), but the zero values are used — `Duration > 0` is always true, so every request is logged. Apply the defaults, and expose `SampleRate`/`SlowThreshold`/`SampleFn` through `ServerConfig`/options (currently unreachable from the `server` package API).
 
 ## Quality / cleanup

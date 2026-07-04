@@ -40,7 +40,8 @@ go test ./... -cover -race
 | `middleware/wide_event.go` | `middleware` | Per-request `WideEventContext` (service metadata, timing, status, error), logged via `slog` as JSON. Tail sampling: always keep errors and slow requests, otherwise `SampleFn`/`SampleRate`. |
 | `lib/jwt/` | `jwt` | HS256 JWT create/verify. `AccessToken`/`RefreshToken` string types, 15 min / 7 day expiries, `TokenGenerator` interface + impl, refresh-token exchange. Claims are flat `map[string]string` plus reserved `exp`/`iat`/`jti`/`typ` (reserved names in caller data are dropped). Every token carries a `typ` claim (`access`/`refresh`) verified with an exact, fail-closed match; the `exp - iat` duration check (±1 s) remains as claim sanity. Refresh tokens carry a random `jti`; `RevocationStore` + `NewTokenGeneratorWithRevocation` enable rotation/denylist (verify fails closed, exchange revokes the old jti). Tests: `jwt_test.go`, `rotation_test.go`, `typ_test.go`. |
 | `errors/errors.go` | `errors` | Domain sentinel errors (`ErrBadRequest`, `ErrUnauthenticated`, `ErrUnauthorized`, `ErrNotFound`, `ErrNotImplemented`, `ErrInternalServerError`), re-exported `Is`/`As`/`New`/`Wrap`, and `MapErrorToStatus`/`MapErrorToHumaStatus`. |
-| `config/load.go` | `config` | Generic `Load[T]` via viper: binds env vars from `mapstructure` tags, reads optional config file, unmarshals into caller's struct. `AppMode` (`development`/`production`). Uses the global viper instance. |
+| `config/load.go` | `config` | Generic `Load[T]` via viper: binds env vars from `mapstructure` tags, reads optional config file, unmarshals into caller's struct. `AppMode` (`development`/`production`). Uses the global viper instance. Logs the loaded config with `sensitive:"true"`-tagged fields redacted (see `redact.go`). |
+| `config/redact.go` | `config` | Redaction for the config log: `sensitive:"true"` string fields show only their last 5 chars (`*****ab1de`); ≤5-char and non-string secrets are fully masked. Top-level struct fields only. |
 | `utils/` | `utils` | Small generic helpers (`Keys`, `Dedupe`, `Map`, `Filter`, `IsStructOrStructPtr`, …). Several duplicate modern stdlib (`maps`/`slices`) — candidates for deletion, see TODOs. |
 | `TODO_ITEMS.md` | — | Production-readiness review findings. Read before changing auth, server lifecycle, or error handling. |
 
@@ -63,9 +64,8 @@ go test ./... -cover -race
 
 `TODO_ITEMS.md` is the authoritative list. Highlights that materially affect any work here:
 
-- `config.Load` logs the full config (secrets included) and its config-file log branches are inverted.
 - Wide-event `SampleRate`/`SlowThreshold` defaults are documented but never applied (zero values used), and they aren't reachable from `server.New`'s options.
 - `router/register.go`'s `getErrorStatusCode`/`getHumaErrorStatus` duplicate `errors.MapErrorToStatus`/`MapErrorToHumaStatus`.
-- Test coverage exists for `lib/jwt`, the root `server` package (`server_test.go`: Start/Shutdown lifecycle), `router` (`register_test.go`: guard enforcement), and `middleware` (`authentication_test.go`: auth error handling). Request-ID, wide-event, and config are untested.
+- Test coverage exists for `lib/jwt`, the root `server` package (`server_test.go`: Start/Shutdown lifecycle), `router` (`register_test.go`: guard enforcement), `middleware` (`authentication_test.go`: auth error handling), and `config` (`redact_test.go`). Request-ID and wide-event middleware are untested.
 
 When fixing any of these, check the corresponding `TODO_ITEMS.md` entry off and update this section.

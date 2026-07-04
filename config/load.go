@@ -1,7 +1,6 @@
 package config
 
 import (
-	"encoding/json"
 	"fmt"
 	"reflect"
 
@@ -39,9 +38,9 @@ func Load[T any](cfg *T) error {
 	// pull in environment variables
 	bindEnvVars(cfg)
 	if err := viper.ReadInConfig(); err != nil {
-		fmt.Println("Using config file:", viper.ConfigFileUsed())
-	} else {
 		fmt.Println("config file not found, using environment variables...")
+	} else {
+		fmt.Println("Using config file:", viper.ConfigFileUsed())
 	}
 	viper.AutomaticEnv()
 
@@ -51,20 +50,12 @@ func Load[T any](cfg *T) error {
 		return fmt.Errorf("failed to unmarshal config: %w", err)
 	}
 
-	// print configuration
-	cfgJson, err := getJsonConfig(cfg)
+	// print configuration with fields tagged `sensitive:"true"` redacted
+	cfgJson, err := redactedForLog(cfg)
 	if err != nil {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}
 	fmt.Println("config: ", cfgJson)
 
 	return nil
-}
-
-func getJsonConfig[T any](cfg *T) (string, error) {
-	cfgJson, err := json.Marshal(cfg)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal config: %w", err)
-	}
-	return string(cfgJson), nil
 }
