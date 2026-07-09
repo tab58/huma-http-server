@@ -20,12 +20,20 @@ const (
 	AppModeProduction AppMode = "production"
 )
 
-func bindEnvVars[T any](v *viper.Viper, cfg *T) {
+// bindEnvVarsAndDefaults binds each `mapstructure`-tagged field to its env
+// var and registers its `default` tag value (if any) as the viper default.
+// Precedence stays viper-native: env > config file > default.
+func bindEnvVarsAndDefaults[T any](v *viper.Viper, cfg *T) {
 	t := reflect.TypeOf(*cfg)
 	for i := range t.NumField() {
 		field := t.Field(i)
-		if tag := field.Tag.Get("mapstructure"); tag != "" {
-			v.BindEnv(tag)
+		tag := field.Tag.Get("mapstructure")
+		if tag == "" {
+			continue
+		}
+		v.BindEnv(tag)
+		if def := field.Tag.Get("default"); def != "" {
+			v.SetDefault(tag, def)
 		}
 	}
 }
@@ -57,8 +65,9 @@ func WithConfigFile(path string) LoadOption {
 }
 
 // Load loads the configuration from environment variables and, when
-// WithConfigFile is given, a config file. Each call uses a fresh viper
-// instance — no state is shared across loads.
+// WithConfigFile is given, a config file. Fields with a `default:"..."`
+// struct tag fall back to that value (precedence: env > file > default).
+// Each call uses a fresh viper instance — no state is shared across loads.
 func Load[T any](cfg *T, options ...LoadOption) error {
 	if !utils.IsStructOrStructPtr(cfg) {
 		return fmt.Errorf("config must be a struct or pointer to a struct")
@@ -77,8 +86,8 @@ func Load[T any](cfg *T, options ...LoadOption) error {
 		}
 	}
 
-	// pull in environment variables
-	bindEnvVars(v, cfg)
+	// pull in environment variables and `default` tag values
+	bindEnvVarsAndDefaults(v, cfg)
 	v.AutomaticEnv()
 
 	// build the config object
